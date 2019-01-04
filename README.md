@@ -1,4 +1,0 @@
-europe
-======
-
-|travis|
