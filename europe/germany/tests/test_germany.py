@@ -1,4 +1,4 @@
-from europe.germany import NAME
+from ..germany import NAME
 
 
 def test_assert_name():
