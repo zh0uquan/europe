@@ -3,6 +3,11 @@ from germany import NAME as gname
 from italy import NAME as iname
 from spain import NAME as sname
 
+from germany import berlin
+from france import paris
+
 print("this is europe main package")
 
-print("this package contains [{} {} {} {}]".format(fname, gname, iname, sname))
+print(f"this package contains [{fname} {gname} {iname} {sname}]")
+
+print(f"test {berlin()} {paris()}")

@@ -1,1 +1,3 @@
-NAME = 'SPAIN'
+__all__ = ("NAME",)
+
+NAME = "SPAIN"
