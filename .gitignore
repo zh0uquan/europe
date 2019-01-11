@@ -108,3 +108,6 @@ ENV/
 
 # poetry lock
 poetry.lock
+
+# auto-generated-test
+autogen_test.sh

@@ -11,4 +11,4 @@ install:
 - poetry install
 script:
 - python tool.py
-- bash test-script.sh
+- bash autogen_test.sh

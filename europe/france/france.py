@@ -7,7 +7,7 @@ __all__ = ("paris", "NAME")
 NAME = "FRANCE"
 
 
-def paris():
+def paris() -> str:
     return "paris"
 
 
