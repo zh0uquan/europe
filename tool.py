@@ -7,5 +7,5 @@
 # if c.err:
 #     raise Exception("failed")
 
-with open("test-script.sh") as f:
+with open("test-script.sh", "w+") as f:
     f.write("poetry run pytest -m france")
