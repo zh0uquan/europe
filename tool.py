@@ -9,10 +9,13 @@ MODULE_NAME = re.compile("(europe)\/(\w+)\/(.*)")
 
 c = delegator.run("git diff origin/master --name-only")
 
+print(f"""file changed:
+{c.out}
+
+""")
 
 marks = set()
 for line in c.out.split("\n"):
-    print(line)
     match = MODULE_NAME.match(line)
     if match:
         marks.add(f"-m {match.group(2)}")
