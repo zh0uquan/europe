@@ -4,4 +4,4 @@ NAME = "GERMANY"
 
 
 def berlin():
-    return "berlin"
+    return "berlin in winter"
