@@ -6,7 +6,8 @@ matrix:
       sudo: true
 before_install:
 - pip install poetry
+- pip install delegator.py
 install:
 - poetry install
 script:
-- poetry run pytest
+- python tool.py

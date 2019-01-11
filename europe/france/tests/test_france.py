@@ -1,5 +1,6 @@
-from ..france import NAME
 import pytest
+
+from ..france import NAME
 
 pytestmark = pytest.mark.france
 
