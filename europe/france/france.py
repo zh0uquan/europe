@@ -30,4 +30,5 @@ async def consumer(receive_channel):
             print("got value {!r}".format(value))
 
 
-trio.run(main)
+if __name__ == "__main__":
+    trio.run(main)
