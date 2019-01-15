@@ -1,10 +1,88 @@
-import re
 import toml
 import delegator
 
+from jsonschema import validate
 from pathlib import Path
+from poetry.utils.toml_file import TomlFile
+from poetry.packages import ProjectPackage
+PAC_JSON_SCHEMA = {}
 
-PACKAGE_RE = re.compile(r"(?P<package>(\w+\/){2,5})(\w+\.\w+)")
+
+class Pac:
+    def __init__(self, file: Path, local_config: dict):
+        self._file = TomlFile(file)
+        self._local_config = local_config
+
+    @property
+    def file(self):
+        return self._file
+
+    @property
+    def local_config(self):
+        return self._local_config
+
+    @classmethod
+    def create(cls, cwd: Path):
+        pac_file = Path(cwd) / "pac.toml"
+
+        if not pac_file.exists():
+            raise RuntimeError("Pac could not find a pac.toml file in {}".format(cwd))
+
+        local_config = TomlFile(pac_file.as_posix()).read()
+        if "package" not in local_config:
+            raise RuntimeError(
+                "[package] section not found in {}".format(pac_file.name)
+            )
+        # Checking validity
+        cls.check(local_config)
+
+        # Load package
+        name = local_config["package"]["name"]
+        version = local_config["package"]["version"]
+
+        package = ProjectPackage(name, version, version)
+        package.root_dir = pac_file.parent
+
+        package.classifiers = local_config.get("classifiers", [])
+
+        if "dependencies" in local_config:
+            for name, constraint in local_config["dependencies"].items():
+                if name.lower() == "python":
+                    package.python_versions = constraint
+                    continue
+
+                if isinstance(constraint, list):
+                    for _constraint in constraint:
+                        package.add_dependency(name, _constraint)
+
+                    continue
+
+                package.add_dependency(name, constraint)
+
+        if "dev-dependencies" in local_config:
+            for name, constraint in local_config["dev-dependencies"].items():
+                if isinstance(constraint, list):
+                    for _constraint in constraint:
+                        package.add_dependency(name, _constraint)
+
+                    continue
+
+                package.add_dependency(name, constraint, category="dev")
+
+        return cls(pac_file, local_config)
+
+    @classmethod
+    def check(cls, config):
+        """
+        Checks the validity of a configuration
+        """
+        result = {"errors": [], "warnings": []}
+        # Schema validation errors
+        validation_errors = validate(config, PAC_JSON_SCHEMA)
+
+        result["errors"] += validation_errors
+
+        return result
 
 
 def is_master_branch() -> bool:
@@ -13,7 +91,7 @@ def is_master_branch() -> bool:
     """
     c = delegator.run("git branch | grep \* | cut -d ' ' -f2")
     if c.err:
-        raise Exception("current branch is not shown due to err")
+        raise RuntimeError("current branch is not shown due to err")
     if c.out == "master":
         print("tests behavior will be different if on the master branch")
         return True
@@ -26,13 +104,16 @@ def get_changed_packages() -> set:
     """
     c = delegator.run("git diff origin/master --name-only")
     packages = set()
-    for line in c.out.split("\n"):
-        match = PACKAGE_RE.match(line)
-        if match:
-            pacakge = match.group("package").rstrip("/")
-            if "tests" in pacakge:
-                pacakge, _ = pacakge.rsplit("/", 1)
-            packages.add(pacakge)
+
+    for path in c.out.split("\n"):
+        package = str(Path(path).parent)
+        if "tests" in package:
+            package, _ = package.rstrip("/").rsplit("/", 1)
+        packages.add(package)
+
+    if "." in packages:
+        packages.remove(".")
+
     return packages
 
 
@@ -67,13 +148,14 @@ def main():
     affected_packages = set(packages)
     dependency_tree = {}
 
-    for path in Path('.').glob("**/*.toml"):
+    for path in Path(".").glob("**/*.toml"):
         with open(path) as tml_file:
             tml = toml.loads(tml_file.read())
-            p
+            print(tml)
 
-            dependency_tree[tml['package']['name']] = [
-                package for package in tml['dependencies']
+            dependency_tree[tml["package"]["name"]] = [
+                package
+                for package in tml["dependencies"]
                 if package.startswith("europe")
             ]
 
@@ -92,12 +174,12 @@ def main():
     #
     #         print(tml['dependencies'])
 
-    # with open("autogen_test.sh", "w+") as f:
-    #     if not modules:
-    #         print("no changes in module is found. Tests phase will be skipped")
-    #     else:
-    #         for module in modules:
-    #             f.write(f"pytest {module}\n")
+    with open("autogen_test.sh", "w+") as f:
+        if not packages:
+            print("no changes in module is found. Tests phase will be skipped")
+        else:
+            for package in packages:
+                f.write(f"pytest {package}\n")
 
 
 if __name__ == "__main__":

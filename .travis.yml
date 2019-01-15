@@ -5,7 +5,7 @@ matrix:
       dist: xenial
       sudo: true
 before_install:
-- pip install delegator.py
+- pip install delegator.py toml poetry
 - python pac.py generate
 install:
 - python setup.py install
