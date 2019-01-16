@@ -1,11 +1,98 @@
-import toml
+import re
 import delegator
 
 from jsonschema import validate
 from pathlib import Path
 from poetry.utils.toml_file import TomlFile
-from poetry.packages import ProjectPackage
-PAC_JSON_SCHEMA = {}
+from poetry.packages import Dependency, VCSDependency
+
+
+AUTO_BUMP_RE = re.compile(r"(\*)|(\d+\.\*)|(\d+\.\d+\.\*)")
+
+PAC_JSON_SCHEMA = {
+    "definitions": {},
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "http://example.com/root.json",
+    "type": "object",
+    "title": "The Root Schema",
+    "required": ["package", "dependencies", "dev-dependencies"],
+    "properties": {
+        "package": {
+            "$id": "#/properties/package",
+            "type": "object",
+            "title": "The Package Schema",
+            "required": ["name", "version"],
+            "properties": {
+                "name": {
+                    "$id": "#/properties/package/properties/name",
+                    "type": "string",
+                    "title": "The Name Schema",
+                    "default": "",
+                    "pattern": "^(.*)$",
+                },
+                "version": {
+                    "$id": "#/properties/package/properties/version",
+                    "type": "string",
+                    "title": "The Version Schema",
+                    "default": "",
+                    "examples": ["0.1.0"],
+                    "pattern": "^(.*)$",
+                },
+            },
+        },
+        "dependencies": {
+            "$id": "#/properties/dependencies",
+            "type": "object",
+            "title": "The Dependencies Schema",
+            "default": None,
+            "": "",
+        },
+        "dev-dependencies": {
+            "$id": "#/properties/dev-dependencies",
+            "type": "object",
+            "title": "The Dev-dependencies Schema",
+        },
+    },
+}
+
+
+class Package:
+    def __init__(self, name, version):
+        self._name = name
+        self._version = version
+
+        self.requires = list()
+        self.dev_requires = list()
+
+    def add_dependency(self, name, constraint=None, category="main"):
+        if constraint is None:
+            constraint = "*"
+
+        if isinstance(constraint, dict):
+
+            if "git" in constraint:
+                # VCS dependency
+                dependency = VCSDependency(
+                    name,
+                    "git",
+                    constraint["git"],
+                    branch=constraint.get("branch", None),
+                    tag=constraint.get("tag", None),
+                    rev=constraint.get("rev", None),
+                )
+            else:
+                version = constraint["version"]
+
+                dependency = Dependency(name, version, category=category)
+        else:
+            dependency = Dependency(name, constraint, category=category)
+
+        if category == "dev":
+            self.dev_requires.append(dependency)
+        else:
+            self.requires.append(dependency)
+
+        return dependency
 
 
 class Pac:
@@ -22,67 +109,44 @@ class Pac:
         return self._local_config
 
     @classmethod
-    def create(cls, cwd: Path):
-        pac_file = Path(cwd) / "pac.toml"
-
-        if not pac_file.exists():
-            raise RuntimeError("Pac could not find a pac.toml file in {}".format(cwd))
-
+    def create(cls, pac_file: Path, auto_bump=False):
         local_config = TomlFile(pac_file.as_posix()).read()
         if "package" not in local_config:
             raise RuntimeError(
                 "[package] section not found in {}".format(pac_file.name)
             )
         # Checking validity
-        cls.check(local_config)
+        cls.check(local_config, auto_bump)
 
         # Load package
         name = local_config["package"]["name"]
         version = local_config["package"]["version"]
 
-        package = ProjectPackage(name, version, version)
+        package = Package(name, version)
         package.root_dir = pac_file.parent
-
-        package.classifiers = local_config.get("classifiers", [])
 
         if "dependencies" in local_config:
             for name, constraint in local_config["dependencies"].items():
-                if name.lower() == "python":
-                    package.python_versions = constraint
-                    continue
-
-                if isinstance(constraint, list):
-                    for _constraint in constraint:
-                        package.add_dependency(name, _constraint)
-
-                    continue
-
                 package.add_dependency(name, constraint)
 
         if "dev-dependencies" in local_config:
             for name, constraint in local_config["dev-dependencies"].items():
-                if isinstance(constraint, list):
-                    for _constraint in constraint:
-                        package.add_dependency(name, _constraint)
-
-                    continue
-
                 package.add_dependency(name, constraint, category="dev")
 
         return cls(pac_file, local_config)
 
     @classmethod
-    def check(cls, config):
+    def check(cls, config, auto_bump=False):
         """
         Checks the validity of a configuration
         """
-        result = {"errors": [], "warnings": []}
-        # Schema validation errors
-        validation_errors = validate(config, PAC_JSON_SCHEMA)
+        validate(config, PAC_JSON_SCHEMA)
 
-        result["errors"] += validation_errors
-
-        return result
+        if auto_bump and not AUTO_BUMP_RE.match(config["package"]["version"]):
+            raise RuntimeError(
+                "changed packages should change the version in order to"
+                "let the automated scripts to build the dependency tree"
+            )
 
 
 def is_master_branch() -> bool:
@@ -142,22 +206,16 @@ def main():
     if is_master_branch():
         return
 
-    packages = get_changed_packages()
-    print(f"changed packages are {packages}")
+    changed_packages = get_changed_packages()
+    print(f"changed packages are {changed_packages}")
 
-    affected_packages = set(packages)
     dependency_tree = {}
 
-    for path in Path(".").glob("**/*.toml"):
-        with open(path) as tml_file:
-            tml = toml.loads(tml_file.read())
-            print(tml)
+    for path in Path(".").rglob("pac.toml"):
+        auto_bump = True if str(path.parent) in changed_packages else False
+        pac = Pac.create(path, auto_bump)
 
-            dependency_tree[tml["package"]["name"]] = [
-                package
-                for package in tml["dependencies"]
-                if package.startswith("europe")
-            ]
+        print(pac.file, pac.local_config)
 
     print(f"affected: {dependency_tree}")
 
@@ -175,10 +233,10 @@ def main():
     #         print(tml['dependencies'])
 
     with open("autogen_test.sh", "w+") as f:
-        if not packages:
+        if not changed_packages:
             print("no changes in module is found. Tests phase will be skipped")
         else:
-            for package in packages:
+            for package in changed_packages:
                 f.write(f"pytest {package}\n")
 
 
