@@ -4,11 +4,11 @@ matrix:
     - python: 3.7
       dist: xenial
       sudo: true
-before_install:
-- pip install delegator.py toml poetry
-#- python pac.py generate
-install:
-- python setup.py install
+#before_install:
+#- pip install delegator.py toml poetry
+#- python pac.py
+#install:
+#- python setup.py install
 # script:
 #- cat autogen_test.sh
 #- bash autogen_test.sh
