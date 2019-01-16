@@ -12,3 +12,6 @@ matrix:
 # script:
 #- cat autogen_test.sh
 #- bash autogen_test.sh
+
+script:
+- echo "hello_world"
