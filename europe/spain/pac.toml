@@ -1,0 +1,11 @@
+[package]
+name = "spain"
+version = "0.1.0"
+
+[dependencies]
+python = "^3.5"
+attrs = "*"
+
+[dev-dependencies]
+pytest = "^3.0"
+pytest-cov = "^2.4"

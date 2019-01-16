@@ -1,0 +1,13 @@
+[package]
+name = "france"
+version = "0.2.0"
+
+[dependencies]
+python = "^3.5"
+requests = "2.11"
+trio = "0.10.0"
+
+
+[dev-dependencies]
+pytest = "^3.0"
+pytest-cov = "^2.4"
