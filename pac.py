@@ -1,7 +1,6 @@
 import re
 import delegator
 
-from collections import defaultdict
 from jsonschema import validate
 from pathlib import Path
 from poetry.utils.toml_file import TomlFile
@@ -112,7 +111,12 @@ class ModifiedPackage(Package):
     def __init__(self, name, version, old_version):
         super().__init__(name, version)
         self._old_version = old_version
+        self._next_version = _get_next_version(version, old_version)
         self._check()
+
+    @property
+    def next_version(self):
+        return self._next_version
 
     @property
     def old_version(self):
@@ -126,11 +130,24 @@ class ModifiedPackage(Package):
             )
 
 
-def _get_old_version(pac_file):
+def _get_next_version(version_constraint, old_version) -> str:
+    match = VERSION_BUMP_RE.match(version_constraint)
+    major, minor, patch = old_version.split(".")
+
+    if match.group("major"):
+        return f"{int(major)+1}.0.0"
+
+    elif match.group("minor"):
+        return f"{major}.{int(minor)+1}.0"
+
+    elif match.group("patch"):
+        return f"{major}.{minor}.{int(patch)+1}"
+
+
+def _get_old_version(pac_file) -> str:
     version_re = re.compile('version\s+=\s+"*(?P<version>(\d+\.\d+\.\d+))"*')
     c = delegator.run(f"git show origin/master:{pac_file} | grep version")
     match = version_re.match(c.out)
-    print(match, c.out)
     if not match:
         raise RuntimeError(
             f"Modified package {pac_file} doesn't have a correct " f"semantic version"
@@ -178,11 +195,10 @@ class Pac:
         name = re.sub("/", ".", str(pac_file.parent))
         version = local_config["package"]["version"]
 
-        if modified:
+        if not modified:
             package = Package(name, version)
         else:
             old_version = _get_old_version(pac_file)
-            print(name, version, old_version)
             package = ModifiedPackage(name, version, old_version)
 
         package.root_dir = pac_file.parent
@@ -204,38 +220,20 @@ class Pac:
         """
         validate(config, PAC_JSON_SCHEMA)
 
-
-def is_master_branch() -> bool:
-    """
-    check if the current branch is master branch name
-    """
-    c = delegator.run("git branch | grep \* | cut -d ' ' -f2")
-    if c.err:
-        raise RuntimeError("current branch is not shown due to err")
-    if c.out == "master":
-        raise RuntimeError("tests behavior will be different if on the master branch")
-    return 0
-
-
-class Graph(defaultdict):
-
-    _pacs = []
+class Application:
+    _all_pacs = []
 
     def __init__(self, changes):
         self._changes = changes
-        self._routes = defaultdict(list)
+        self.affected = []
 
     @property
     def changes(self):
         return self._changes
 
     @property
-    def routes(self):
-        return self._routes
-
-    @property
     def pacs(self):
-        return self._pacs
+        return self._all_pacs
 
     @classmethod
     def track_changes(cls):
@@ -260,33 +258,41 @@ class Graph(defaultdict):
 
     @classmethod
     def init(cls):
+        c = delegator.run("git branch | grep \* | cut -d ' ' -f2")
+        if c.err:
+            raise RuntimeError("current branch is not shown due to err")
+        if c.out == "master":
+            raise RuntimeError(
+                "tests behavior will be different if on the master branch")
+
         for path in Path(".").rglob("pac.toml"):
             pac = Pac.create(path)
-            cls._pacs.append(pac)
+            cls._all_pacs.append(pac)
 
         changes = cls.track_changes()
 
         return cls(changes)
 
-    def make_graph(self):
-        # print(self.routes)
-        # print(self.changes)
-        # print(self._pacs)
-        for mpac in self.changes:
-            print(mpac.old_version)
+    def find_affected_packages(self):
+        changed_packges = {
+            changed_pac.package.name: changed_pac.package.next_version
+            for changed_pac in self.changes
+        }
 
-        for pac in self._pacs:
-            self._routes[pac.package.name] += [
-                (dep_name, dep.pretty_constraint)
-                for dep_name, dep in pac.package.requires.items()
-            ]
+        print(changed_packges)
 
-            print(
-                [
-                    (dep_name, dep.pretty_constraint)
-                    for dep_name, dep in pac.package.requires.items()
-                ]
-            )
+        # for pac in self._all_pacs:
+        #     self._routes[pac.package.name] += [
+        #         (dep_name, dep.pretty_constraint)
+        #         for dep_name, dep in pac.package.requires.items()
+        #     ]
+        #
+        #     print(
+        #         [
+        #             (dep_name, dep.pretty_constraint)
+        #             for dep_name, dep in pac.package.requires.items()
+        #         ]
+        #     )
         #
         # for pac in self.pacs:
         #     for change_pac in self.changes:
@@ -295,14 +301,9 @@ class Graph(defaultdict):
 
 
 def main():
-    if is_master_branch():
-        return
+    app = Application.init()
 
-    # print(pac.package.name, pac.package.version)
-
-    graph = Graph.init()
-
-    graph.make_graph()
+    app.find_affected_packages()
 
     # print(f"affected: {}")
     #
