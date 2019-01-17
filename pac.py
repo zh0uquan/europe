@@ -253,6 +253,7 @@ class Application:
             else:
                 for package in tests_packages:
                     path = re.sub("\.", "/", package.name)
+                    print(f"test path: {path}")
                     f.write(f"pytest {path}\n")
 
     def find_affected_packages(self):
