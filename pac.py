@@ -1,13 +1,18 @@
 import re
 import delegator
 
+from collections import defaultdict
 from jsonschema import validate
 from pathlib import Path
 from poetry.utils.toml_file import TomlFile
 from poetry.packages import Dependency, VCSDependency
 
 
-AUTO_BUMP_RE = re.compile(r"(\*)|(\d+\.\*)|(\d+\.\d+\.\*)")
+VERSION_BUMP_RE = re.compile(
+    r"(?P<major>\*)|(?P<minor>\d+\.\*)|(?P<patch>\d+\.\d+\.\*)"
+)
+
+ROOT_PATH = Path(".")
 
 PAC_JSON_SCHEMA = {
     "definitions": {},
@@ -61,8 +66,16 @@ class Package:
         self._name = name
         self._version = version
 
-        self.requires = list()
-        self.dev_requires = list()
+        self.requires = dict()
+        self.dev_requires = dict()
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def version(self):
+        return self._version
 
     def add_dependency(self, name, constraint=None, category="main"):
         if constraint is None:
@@ -88,17 +101,48 @@ class Package:
             dependency = Dependency(name, constraint, category=category)
 
         if category == "dev":
-            self.dev_requires.append(dependency)
+            self.dev_requires[name] = dependency
         else:
-            self.requires.append(dependency)
+            self.requires[name] = dependency
 
         return dependency
 
 
+class ModifiedPackage(Package):
+    def __init__(self, name, version, old_version):
+        super().__init__(name, version)
+        self._old_version = old_version
+        self._check()
+
+    @property
+    def old_version(self):
+        return self._old_version
+
+    def _check(self):
+        if not VERSION_BUMP_RE.match(self.version):
+            raise RuntimeError(
+                "changed packages should change the version in order to"
+                "let the automated scripts to build the dependency tree"
+            )
+
+
+def _get_old_version(pac_file):
+    version_re = re.compile('version\s+=\s+"*(?P<version>(\d+\.\d+\.\d+))"*')
+    c = delegator.run(f"git show origin/master:{pac_file} | grep version")
+    match = version_re.match(c.out)
+    print(match, c.out)
+    if not match:
+        raise RuntimeError(
+            f"Modified package {pac_file} doesn't have a correct " f"semantic version"
+        )
+    return match.group("version")
+
+
 class Pac:
-    def __init__(self, file: Path, local_config: dict):
+    def __init__(self, file: Path, local_config: dict, package: Package):
         self._file = TomlFile(file)
         self._local_config = local_config
+        self._package = package
 
     @property
     def file(self):
@@ -108,21 +152,39 @@ class Pac:
     def local_config(self):
         return self._local_config
 
+    @property
+    def package(self):
+        return self._package
+
     @classmethod
-    def create(cls, pac_file: Path, auto_bump=False):
+    def create(cls, pac_file: Path, modified=False):
+
         local_config = TomlFile(pac_file.as_posix()).read()
         if "package" not in local_config:
             raise RuntimeError(
                 "[package] section not found in {}".format(pac_file.name)
             )
         # Checking validity
-        cls.check(local_config, auto_bump)
+        cls.check(local_config)
 
         # Load package
-        name = local_config["package"]["name"]
+        if str(pac_file.parts[-2]) != local_config["package"]["name"]:
+            raise RuntimeWarning(
+                "[package] directory name is not as same as we defined in {},".format(
+                    pac_file
+                )
+            )
+
+        name = re.sub("/", ".", str(pac_file.parent))
         version = local_config["package"]["version"]
 
-        package = Package(name, version)
+        if modified:
+            package = Package(name, version)
+        else:
+            old_version = _get_old_version(pac_file)
+            print(name, version, old_version)
+            package = ModifiedPackage(name, version, old_version)
+
         package.root_dir = pac_file.parent
 
         if "dependencies" in local_config:
@@ -133,20 +195,14 @@ class Pac:
             for name, constraint in local_config["dev-dependencies"].items():
                 package.add_dependency(name, constraint, category="dev")
 
-        return cls(pac_file, local_config)
+        return cls(pac_file, local_config, package)
 
     @classmethod
-    def check(cls, config, auto_bump=False):
+    def check(cls, config):
         """
         Checks the validity of a configuration
         """
         validate(config, PAC_JSON_SCHEMA)
-
-        if auto_bump and not AUTO_BUMP_RE.match(config["package"]["version"]):
-            raise RuntimeError(
-                "changed packages should change the version in order to"
-                "let the automated scripts to build the dependency tree"
-            )
 
 
 def is_master_branch() -> bool:
@@ -157,87 +213,105 @@ def is_master_branch() -> bool:
     if c.err:
         raise RuntimeError("current branch is not shown due to err")
     if c.out == "master":
-        print("tests behavior will be different if on the master branch")
-        return True
-    return False
+        raise RuntimeError("tests behavior will be different if on the master branch")
+    return 0
 
 
-def get_changed_packages() -> set:
-    """
-    get all the changed modules
-    """
-    c = delegator.run("git diff origin/master --name-only")
-    packages = set()
+class Graph(defaultdict):
 
-    for path in c.out.split("\n"):
-        package = str(Path(path).parent)
-        if "tests" in package:
-            package, _ = package.rstrip("/").rsplit("/", 1)
-        packages.add(package)
+    _pacs = []
 
-    if "." in packages:
-        packages.remove(".")
+    def __init__(self, changes):
+        self._changes = changes
+        self._routes = defaultdict(list)
 
-    return packages
+    @property
+    def changes(self):
+        return self._changes
 
+    @property
+    def routes(self):
+        return self._routes
 
-def struct_dependency_tree(tml: dict):
-    """
-    struct the trees using *.toml
-    """
-    pass
+    @property
+    def pacs(self):
+        return self._pacs
 
+    @classmethod
+    def track_changes(cls):
+        c = delegator.run("git diff origin/master --name-only")
+        packages = set()
 
-def bfs(dep_tree: dict, start: str, visited: set) -> None:
-    """
-    :param dep_tree: the dep tree build by toml
-    :param start: start of the package
-    :param visited: the packages all ready included
-    """
-    queue = [start]
-    while queue:
-        package = queue.pop(0)
-        if package not in visited:
-            visited.add(package)
-            queue.extend(dep_tree[package])
+        for path in c.out.split("\n"):
+            # we don't detect changes in non python code
+            if Path(path).suffix != ".py":
+                continue
+
+            package = Path(path).parent
+            if "tests" in str(package):
+                package = Path(path).parent[1]
+            packages.add(package)
+
+        # remove root changes
+        if ROOT_PATH in packages:
+            packages.remove(ROOT_PATH)
+
+        return [Pac.create(package / "pac.toml", modified=True) for package in packages]
+
+    @classmethod
+    def init(cls):
+        for path in Path(".").rglob("pac.toml"):
+            pac = Pac.create(path)
+            cls._pacs.append(pac)
+
+        changes = cls.track_changes()
+
+        return cls(changes)
+
+    def make_graph(self):
+        # print(self.routes)
+        # print(self.changes)
+        # print(self._pacs)
+        for mpac in self.changes:
+            print(mpac.old_version)
+
+        for pac in self._pacs:
+            self._routes[pac.package.name] += [
+                (dep_name, dep.pretty_constraint)
+                for dep_name, dep in pac.package.requires.items()
+            ]
+
+            print(
+                [
+                    (dep_name, dep.pretty_constraint)
+                    for dep_name, dep in pac.package.requires.items()
+                ]
+            )
+        #
+        # for pac in self.pacs:
+        #     for change_pac in self.changes:
+        #         if change_pac.package.name in pac.package.requires:
+        #             print("hi")
 
 
 def main():
     if is_master_branch():
         return
 
-    changed_packages = get_changed_packages()
-    print(f"changed packages are {changed_packages}")
+    # print(pac.package.name, pac.package.version)
 
-    dependency_tree = {}
+    graph = Graph.init()
 
-    for path in Path(".").rglob("pac.toml"):
-        auto_bump = True if str(path.parent) in changed_packages else False
-        pac = Pac.create(path, auto_bump)
+    graph.make_graph()
 
-        print(pac.file, pac.local_config)
-
-    print(f"affected: {dependency_tree}")
-
-    # for module in modules:
-    #     toml_path = next(Path(module).glob("*.toml"))
+    # print(f"affected: {}")
     #
-    #     with open(toml_path) as tml_file:
-    #         tml = toml.loads(tml_file.read())
-    #
-    #         package_name = "{prefix}.{package_name}".format(
-    #             prefix=module.replace('/', '.'),
-    #             package_name=tml["package"]["name"]
-    #         )
-    #
-    #         print(tml['dependencies'])
-
-    with open("autogen_test.sh", "w+") as f:
-        if not changed_packages:
-            print("no changes in module is found. Tests phase will be skipped")
-        else:
-            for package in changed_packages:
-                f.write(f"pytest {package}\n")
+    # with open("autogen_test.sh", "w+") as f:
+    #     if not changed_packages:
+    #         print("no changes in module is found. Tests phase will be skipped")
+    #     else:
+    #         for package in changed_packages:
+    #             f.write(f"pytest {package}\n")
 
 
 if __name__ == "__main__":

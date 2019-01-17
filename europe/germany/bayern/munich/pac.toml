@@ -1,10 +1,12 @@
 [package]
 name = "munich"
-version = "0.1.*"
+version = "0.1.0"
 
 [dependencies]
 "europe.france" = "0.1.0"
 fasttext = { git = "git+git://github.com/facebookresearch/fastText.git"}
+
 [dev-dependencies]
 pytest = "^3.0"
 pytest-cov = "^2.4"
+
