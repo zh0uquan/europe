@@ -1,6 +1,6 @@
 [package]
 name = "italy"
-version = "0.1.0"
+version = "0.1.*"
 
 [dependencies]
 "europe.germany.bayern.munich" = "^0.1.1"
