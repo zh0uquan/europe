@@ -4,7 +4,7 @@ import delegator
 from jsonschema import validate
 from pathlib import Path
 from poetry.utils.toml_file import TomlFile
-from poetry.packages import Dependency, VCSDependency
+from poetry.packages import Package
 
 
 VERSION_BUMP_RE = re.compile(
@@ -59,60 +59,27 @@ PAC_JSON_SCHEMA = {
     },
 }
 
+NO_MANUL_BUMP_VERSION_ERROR = """
+No manual version bump found in your toml file!
+Please use fuzzy bump to increase the package you changed!
+For example, if you want to release a new major change, do
+change the version in pac.toml file as follows:
 
-class Package:
-    def __init__(self, name, version):
-        self._name = name
-        self._version = version
+[package]
+name = changed_package
+version = "*" # indicates a major bump for automated scripts
 
-        self.requires = dict()
-        self.dev_requires = dict()
-
-    @property
-    def name(self):
-        return self._name
-
-    @property
-    def version(self):
-        return self._version
-
-    def add_dependency(self, name, constraint=None, category="main"):
-        if constraint is None:
-            constraint = "*"
-
-        if isinstance(constraint, dict):
-
-            if "git" in constraint:
-                # VCS dependency
-                dependency = VCSDependency(
-                    name,
-                    "git",
-                    constraint["git"],
-                    branch=constraint.get("branch", None),
-                    tag=constraint.get("tag", None),
-                    rev=constraint.get("rev", None),
-                )
-            else:
-                version = constraint["version"]
-
-                dependency = Dependency(name, version, category=category)
-        else:
-            dependency = Dependency(name, constraint, category=category)
-
-        if category == "dev":
-            self.dev_requires[name] = dependency
-        else:
-            self.requires[name] = dependency
-
-        return dependency
+"""
 
 
 class ModifiedPackage(Package):
     def __init__(self, name, version, old_version):
-        super().__init__(name, version)
+        if not VERSION_BUMP_RE.match(version):
+            raise RuntimeError(NO_MANUL_BUMP_VERSION_ERROR)
+
         self._old_version = old_version
         self._next_version = _get_next_version(version, old_version)
-        self._check()
+        super().__init__(name, self.next_version)
 
     @property
     def next_version(self):
@@ -121,13 +88,6 @@ class ModifiedPackage(Package):
     @property
     def old_version(self):
         return self._old_version
-
-    def _check(self):
-        if not VERSION_BUMP_RE.match(self.version):
-            raise RuntimeError(
-                "changed packages should change the version in order to"
-                "let the automated scripts to build the dependency tree"
-            )
 
 
 def _get_next_version(version_constraint, old_version) -> str:
@@ -220,41 +180,41 @@ class Pac:
         """
         validate(config, PAC_JSON_SCHEMA)
 
+
 class Application:
-    _all_pacs = []
-
-    def __init__(self, changes):
-        self._changes = changes
-        self.affected = []
-
-    @property
-    def changes(self):
-        return self._changes
+    def __init__(self, changed_packages, pending_packages):
+        self._changed_packages = changed_packages
+        self._pending_packages = pending_packages
+        self._affected_packages = []
 
     @property
-    def pacs(self):
-        return self._all_pacs
+    def changed_packages(self):
+        return self._changed_packages
+
+    @property
+    def affected_packages(self):
+        return self._affected_packages
 
     @classmethod
-    def track_changes(cls):
+    def track_changed_paths(cls):
         c = delegator.run("git diff origin/master --name-only")
-        packages = set()
+        package_paths = set()
 
         for path in c.out.split("\n"):
             # we don't detect changes in non python code
             if Path(path).suffix != ".py":
                 continue
 
-            package = Path(path).parent
-            if "tests" in str(package):
-                package = Path(path).parent[1]
-            packages.add(package)
+            package_path = Path(path).parent
+            if "tests" in str(package_path):
+                package_path = Path(path).parent[1]
+            package_paths.add(package_path)
 
         # remove root changes
-        if ROOT_PATH in packages:
-            packages.remove(ROOT_PATH)
+        if ROOT_PATH in package_paths:
+            package_paths.remove(ROOT_PATH)
 
-        return [Pac.create(package / "pac.toml", modified=True) for package in packages]
+        return set(path / "pac.toml" for path in package_paths)
 
     @classmethod
     def init(cls):
@@ -263,56 +223,69 @@ class Application:
             raise RuntimeError("current branch is not shown due to err")
         if c.out == "master":
             raise RuntimeError(
-                "tests behavior will be different if on the master branch")
+                "tests behavior will be different if on the master branch"
+            )
 
-        for path in Path(".").rglob("pac.toml"):
-            pac = Pac.create(path)
-            cls._all_pacs.append(pac)
+        all_paths = set(Path(".").rglob("pac.toml"))
+        changed_paths = cls.track_changed_paths()
+        pending_paths = all_paths - changed_paths
 
-        changes = cls.track_changes()
+        changed_packages = [
+            Pac.create(path, modified=True).package for path in changed_paths
+        ]
 
-        return cls(changes)
+        pending_packages = [Pac.create(path).package for path in pending_paths]
+        return cls(changed_packages, pending_packages)
+
+    def run(self):
+        self.find_affected_packages()
+        self.generate_setup()
+        self.generate_testfile()
+
+    def generate_setup(self):
+        pass
+
+    def generate_testfile(self):
+        tests_packages = self._affected_packages + self._changed_packages
+        with open("autogen_test.sh", "w+") as f:
+            if not tests_packages:
+                print("No code changes in package is found. Safe PASS")
+            else:
+                for package in tests_packages:
+                    path = re.sub("\.", "/", package.name)
+                    f.write(f"pytest {path}\n")
 
     def find_affected_packages(self):
-        changed_packges = {
-            changed_pac.package.name: changed_pac.package.next_version
-            for changed_pac in self.changes
+        affected_packages = set()
+        changed_package_dict = {
+            package.name: package for package in self._changed_packages
         }
 
-        print(changed_packges)
+        for package in self._pending_packages:
+            # skip the package we have changed
+            if package in self._changed_packages:
+                continue
 
-        # for pac in self._all_pacs:
-        #     self._routes[pac.package.name] += [
-        #         (dep_name, dep.pretty_constraint)
-        #         for dep_name, dep in pac.package.requires.items()
-        #     ]
-        #
-        #     print(
-        #         [
-        #             (dep_name, dep.pretty_constraint)
-        #             for dep_name, dep in pac.package.requires.items()
-        #         ]
-        #     )
-        #
-        # for pac in self.pacs:
-        #     for change_pac in self.changes:
-        #         if change_pac.package.name in pac.package.requires:
-        #             print("hi")
+            for dependency in package.requires:
+                dependency_name = dependency.name
+                if dependency_name not in changed_package_dict:
+                    continue
+
+                if package in affected_packages:
+                    continue
+
+                # pac's dependency is affected by changed packages
+                if dependency.accepts(changed_package_dict[dependency_name]):
+                    affected_packages.add(package)
+
+        self._affected_packages = list(affected_packages)
+
+        return self._affected_packages
 
 
 def main():
     app = Application.init()
-
-    app.find_affected_packages()
-
-    # print(f"affected: {}")
-    #
-    # with open("autogen_test.sh", "w+") as f:
-    #     if not changed_packages:
-    #         print("no changes in module is found. Tests phase will be skipped")
-    #     else:
-    #         for package in changed_packages:
-    #             f.write(f"pytest {package}\n")
+    app.run()
 
 
 if __name__ == "__main__":
