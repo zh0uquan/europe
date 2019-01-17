@@ -9,6 +9,6 @@ before_install:
 - python pac.py
 install:
 - python setup.py install
- script:
+script:
 - bash autogen_test.sh
 
