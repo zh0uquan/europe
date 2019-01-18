@@ -145,17 +145,17 @@ class Pac:
         # Checking validity
         cls.check(local_config)
 
-        # Load package
-        if (
-            len(pac_file.parts) > 2
-            and pac_file.parts[-2] != local_config["package"]["name"]
-        ):
-            raise RuntimeWarning(
-                "[package] directory name is not as same as we "
-                "defined in {},".format(pac_file)
-            )
+        if str(pac_file.parent) == str(ROOT_PATH):
+            name = local_config["package"]["name"]
 
-        name = re.sub("/", ".", str(pac_file.parent))
+        else:
+            if pac_file.parts[-2] != local_config["package"]["name"]:
+                raise RuntimeWarning(
+                    "[package] directory name is not as same as we "
+                    "defined in {},".format(pac_file)
+                )
+
+            name = re.sub("/", ".", str(pac_file.parent))
         version = local_config["package"]["version"]
 
         if not modified:
@@ -263,6 +263,7 @@ class Application:
                 print("No code changes in package is found. Safe PASS")
             else:
                 for package in tests_packages:
+
                     path = re.sub("\.", "/", package.name)
                     print(f"test path: {path}")
                     f.write(f"pytest {path}\n")

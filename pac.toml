@@ -1,6 +1,6 @@
 [package]
 name = "europe"
-version = "0.1.0"
+version = "*"
 
 [dependencies]
 python = "^3.5"
