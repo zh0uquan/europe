@@ -60,6 +60,7 @@ PAC_JSON_SCHEMA = {
 }
 
 NO_MANUL_BUMP_VERSION_ERROR = """
+Please check package {name}
 No manual version bump found in your toml file!
 Please use fuzzy bump to increase the package you changed!
 For example, if you want to release a new major change, do
@@ -75,7 +76,7 @@ version = "*" # indicates a major bump for automated scripts
 class ModifiedPackage(Package):
     def __init__(self, name, version, old_version):
         if not VERSION_BUMP_RE.match(version):
-            raise RuntimeError(NO_MANUL_BUMP_VERSION_ERROR)
+            raise RuntimeError(NO_MANUL_BUMP_VERSION_ERROR.format(name=name))
 
         self._old_version = old_version
         self._next_version = _get_next_version(version, old_version)
@@ -110,7 +111,7 @@ def _get_old_version(pac_file) -> str:
     match = version_re.match(c.out)
     if not match:
         raise RuntimeError(
-            f"Modified package {pac_file} doesn't have a correct " f"semantic version"
+            f"Modified package {pac_file} doesn't have a correct semantic version"
         )
     return match.group("version")
 
@@ -145,11 +146,13 @@ class Pac:
         cls.check(local_config)
 
         # Load package
-        if str(pac_file.parts[-2]) != local_config["package"]["name"]:
+        if (
+            len(pac_file.parts) > 2
+            and pac_file.parts[-2] != local_config["package"]["name"]
+        ):
             raise RuntimeWarning(
-                "[package] directory name is not as same as we defined in {},".format(
-                    pac_file
-                )
+                "[package] directory name is not as same as we "
+                "defined in {},".format(pac_file)
             )
 
         name = re.sub("/", ".", str(pac_file.parent))
@@ -207,12 +210,20 @@ class Application:
 
             package_path = Path(path).parent
             if "tests" in str(package_path):
-                package_path = Path(path).parent[1]
-            package_paths.add(package_path)
+                package_path = Path(path).parents[1]
 
-        # remove root changes
-        if ROOT_PATH in package_paths:
-            package_paths.remove(ROOT_PATH)
+            # remove root changes
+            if ROOT_PATH in package_paths:
+                package_paths.remove(ROOT_PATH)
+
+            while True:
+                # make sure changes belong to one of the package
+                if (package_path / "pac.toml").exists():
+                    break
+
+                package_path = Path(package_path).parents[0]
+
+            package_paths.add(package_path)
 
         return set(path / "pac.toml" for path in package_paths)
 
