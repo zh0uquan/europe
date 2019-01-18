@@ -8,7 +8,7 @@ before_install:
 - pip install delegator.py toml poetry jsonschema
 - python pac.py
 install:
-- python setup.py install
+- pip install .
 script:
 - bash autogen_test.sh
 
