@@ -245,6 +245,8 @@ class Application:
             Pac.create(path, modified=True).package for path in changed_paths
         ]
 
+        print(pending_paths)
+
         pending_packages = [Pac.create(path).package for path in pending_paths]
         return cls(changed_packages, pending_packages)
 
