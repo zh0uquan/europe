@@ -3,7 +3,6 @@ name = "europe"
 version = "*"
 
 [dependencies]
-python = "^3.5"
 Werkzeug = "0.14.1"
 
 [dev-dependencies]

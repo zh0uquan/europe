@@ -1,4 +1,3 @@
-from .france import *
+from .france import paris, NAME
 
-
-__all__ = france.__all__
+__all__ = ("paris", "NAME")

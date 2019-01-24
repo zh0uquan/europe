@@ -1,10 +1,9 @@
 [package]
 name = "france"
-version = "0.2.0"
+version = "0.2.*"
 
 [dependencies]
-python = "^3.5"
-requests = "2.11"
+requests = "2.14"
 trio = "0.10.0"
 
 

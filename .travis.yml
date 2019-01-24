@@ -5,10 +5,11 @@ matrix:
       dist: xenial
       sudo: true
 before_install:
-- pip install delegator.py toml poetry jsonschema
+- pip install delegator.py toml poetry jsonschema pip-tools
 - python pac.py
 install:
-- pip install .
+- pip-compile autogen_requirements.ini
+- pip install -r requirements.txt
 script:
 - bash autogen_test.sh
 

@@ -1,17 +1,23 @@
+import os
 import re
 import delegator
+import subprocess
 
 from jsonschema import validate
 from pathlib import Path
 from poetry.utils.toml_file import TomlFile
-from poetry.packages import Package
-
+from poetry.packages import Package, VCSDependency
 
 VERSION_BUMP_RE = re.compile(
     r"(?P<major>\*)|(?P<minor>\d+\.\*)|(?P<patch>\d+\.\d+\.\*)"
 )
 
 ROOT_PATH = Path(".")
+REPO_NAME = re.compile(r"europe(\.\w+])*")
+AUTOGEN_REQ_INI = "autogen_requirements.ini"
+AUTOGEN_REQ_TXT = "autogen_requirements.txt"
+AUTO_TEST = "autogen_test.sh"
+SETUP_PY = "setup.py"
 
 PAC_JSON_SCHEMA = {
     "definitions": {},
@@ -72,6 +78,19 @@ version = "*" # indicates a major bump for automated scripts
 
 """
 
+SETUP_PY_TEMPLATE = """
+from setuptools import setup
+
+setup(
+    name="{package_name}",
+    version="{package_version}",
+    description="AUTO GENERATED SCRIPT",
+    packages=["{package_name}"],
+    include_package_data=True,
+    zip_safe=True
+)
+"""
+
 
 class ModifiedPackage(Package):
     def __init__(self, name, version, old_version):
@@ -79,12 +98,8 @@ class ModifiedPackage(Package):
             raise RuntimeError(NO_MANUL_BUMP_VERSION_ERROR.format(name=name))
 
         self._old_version = old_version
-        self._next_version = _get_next_version(version, old_version)
-        super().__init__(name, self.next_version)
-
-    @property
-    def next_version(self):
-        return self._next_version
+        next_version = _get_next_version(version, old_version)
+        super().__init__(name, next_version)
 
     @property
     def old_version(self):
@@ -184,6 +199,65 @@ class Pac:
         validate(config, PAC_JSON_SCHEMA)
 
 
+def generate_requirements_text(requirements):
+    with open(AUTOGEN_REQ_INI, "w+") as f:
+        for dep in requirements:
+            if isinstance(dep, VCSDependency):
+                f.write(f"-e {dep.source}#egg={dep.name}\n")
+            else:
+                f.write(f"{dep.to_pep_508()}\n")
+
+    c = delegator.run(f"pip-compile {AUTOGEN_REQ_INI} -v")
+    c.run()
+    if c.err:
+        raise RuntimeError(c.err)
+    print(c.out)
+
+    os.remove(AUTOGEN_REQ_INI)
+
+
+def get_requirements(package, dev=False):
+    if dev:
+        requirements = package.requires + package.dev_requires
+    else:
+        requirements = package.requires
+    return requirements
+
+
+def install_package(package):
+    with open("setup.py", "w+") as f:
+        f.write(
+            SETUP_PY_TEMPLATE.format(
+                package_name=package.name,
+                package_version=package.version
+            )
+        )
+
+    try:
+        c1 = delegator.run("python setup.py install")
+        c2 = delegator.run(f"pip install -r {AUTOGEN_REQ_TXT}")
+        if c1.err or c2.err:
+            raise Exception(
+                f"""{c1.err}
+                
+                {c2.err}
+                """
+            )
+    except Exception as e:
+        raise RuntimeError(e)
+    else:
+        print(c1.out)
+        print(c2.out)
+    finally:
+        os.remove(AUTOGEN_REQ_TXT)
+        os.remove(SETUP_PY)
+
+
+def run_package_tests(package):
+    path = re.sub("\.", "/", package.name)
+    subprocess.call(["pytest", f"{path}"])
+
+
 class Application:
     def __init__(self, changed_packages, pending_packages):
         self._changed_packages = changed_packages
@@ -245,32 +319,39 @@ class Application:
             Pac.create(path, modified=True).package for path in changed_paths
         ]
 
-        print(pending_paths)
-
         pending_packages = [Pac.create(path).package for path in pending_paths]
         return cls(changed_packages, pending_packages)
 
     def run(self):
-        self.find_affected_packages()
-        self.generate_setup()
-        self.generate_testfile()
+        self._find_affected_packages()
+        print(f"we have tracked changed packages: {self._changed_packages}")
+        print(f"we have found affected packages {self._affected_packages}")
 
-    def generate_setup(self):
-        pass
+        for package in self._changed_packages:
+            # we need to assume all the requirements in package
+            # is already built there, to let us to install from
+            print(package.name)
+            print("=" * 20)
+            requirements = get_requirements(package, dev=True)
+            generate_requirements_text(requirements)
+            install_package(package)
+            run_package_tests(package)
 
-    def generate_testfile(self):
-        tests_packages = self._affected_packages + self._changed_packages
-        with open("autogen_test.sh", "w+") as f:
-            if not tests_packages:
-                print("No code changes in package is found. Safe PASS")
-            else:
-                for package in tests_packages:
+        for package in self._affected_packages:
+            requirements = get_requirements(package, dev=True)
+            generate_requirements_text(requirements)
+            install_package(package)
+            run_package_tests(package)
 
-                    path = re.sub("\.", "/", package.name)
-                    print(f"test path: {path}")
-                    f.write(f"pytest {path}\n")
+        # detect global conflicts by checking the requirements compiled together
+        requirements = []
+        for package in self._changed_packages + self._affected_packages:
+            requirements.extend(get_requirements(package, dev=True))
 
-    def find_affected_packages(self):
+        # try to compile and see if there is a error
+        generate_requirements_text(requirements)
+    
+    def _find_affected_packages(self):
         affected_packages = set()
         changed_package_dict = {
             package.name: package for package in self._changed_packages
@@ -305,3 +386,13 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    # from poetry.packages import Dependency
+    from poetry.installation import Installer
+
+    # d = Dependency("pytest", "^4.0.0")
+    # print(d.constraint)
+
+    # functionality pac install version
+
+
