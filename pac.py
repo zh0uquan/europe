@@ -1,8 +1,11 @@
 import os
 import re
+import json
+import toml
 import delegator
 import subprocess
 
+import click
 from jsonschema import validate
 from pathlib import Path
 from poetry.utils.toml_file import TomlFile
@@ -11,6 +14,7 @@ from poetry.packages import Package, VCSDependency
 VERSION_BUMP_RE = re.compile(
     r"(?P<major>\*)|(?P<minor>\d+\.\*)|(?P<patch>\d+\.\d+\.\*)"
 )
+VERSION_RE = re.compile('version\s+=\s+"*(?P<version>(\d+\.\d+\.\d+))"*')
 
 ROOT_PATH = Path(".")
 REPO_NAME = re.compile(r"europe(\.\w+])*")
@@ -98,8 +102,13 @@ class ModifiedPackage(Package):
             raise RuntimeError(NO_MANUL_BUMP_VERSION_ERROR.format(name=name))
 
         self._old_version = old_version
-        next_version = _get_next_version(version, old_version)
-        super().__init__(name, next_version)
+        self._next_version = _get_next_version(version, old_version)
+        super().__init__(name, self._next_version)
+
+
+    @property
+    def next_version(self):
+        return self._next_version
 
     @property
     def old_version(self):
@@ -121,9 +130,9 @@ def _get_next_version(version_constraint, old_version) -> str:
 
 
 def _get_old_version(pac_file) -> str:
-    version_re = re.compile('version\s+=\s+"*(?P<version>(\d+\.\d+\.\d+))"*')
+
     c = delegator.run(f"git show origin/master:{pac_file} | grep version")
-    match = version_re.match(c.out)
+    match = VERSION_RE.match(c.out)
     if not match:
         raise RuntimeError(
             f"Modified package {pac_file} doesn't have a correct semantic version"
@@ -228,8 +237,7 @@ def install_package(package):
     with open("setup.py", "w+") as f:
         f.write(
             SETUP_PY_TEMPLATE.format(
-                package_name=package.name,
-                package_version=package.version
+                package_name=package.name, package_version=package.version
             )
         )
 
@@ -258,134 +266,115 @@ def run_package_tests(package):
     subprocess.call(["pytest", f"{path}"])
 
 
-class Application:
-    def __init__(self, changed_packages, pending_packages):
-        self._changed_packages = changed_packages
-        self._pending_packages = pending_packages
-        self._affected_packages = []
+def track_changed_paths():
+    c = delegator.run("git diff origin/master --name-only")
+    package_paths = set()
 
-    @property
-    def changed_packages(self):
-        return self._changed_packages
+    for path in c.out.split("\n"):
+        # we don't detect changes in non python code
+        if Path(path).suffix != ".py":
+            continue
 
-    @property
-    def affected_packages(self):
-        return self._affected_packages
+        package_path = Path(path).parent
+        if "tests" in str(package_path):
+            package_path = Path(path).parents[1]
 
-    @classmethod
-    def track_changed_paths(cls):
-        c = delegator.run("git diff origin/master --name-only")
-        package_paths = set()
+        # remove root changes
+        if ROOT_PATH in package_paths:
+            package_paths.remove(ROOT_PATH)
 
-        for path in c.out.split("\n"):
-            # we don't detect changes in non python code
-            if Path(path).suffix != ".py":
+        while True:
+            # make sure changes belong to one of the package
+            if (package_path / "pac.toml").exists():
+                break
+            package_path = Path(package_path).parents[0]
+        package_paths.add(package_path)
+
+    return set(path / "pac.toml" for path in package_paths)
+
+
+@click.command()
+def scoped_test():
+    c = delegator.run("git branch | grep \* | cut -d ' ' -f2")
+    if c.err:
+        raise RuntimeError("current branch is not shown due to err")
+
+    all_paths = set(Path(".").rglob("pac.toml"))
+    changed_paths = track_changed_paths()
+    pending_paths = all_paths - changed_paths
+
+    changed_packages = [
+        Pac.create(path, modified=True).package for path in changed_paths
+    ]
+    pending_packages = [Pac.create(path).package for path in pending_paths]
+
+    affected_packages = set()
+
+    changed_package_dict = {package.name: package for package in changed_packages}
+
+    for package in pending_packages:
+        # skip the package we have changed
+        if package in changed_packages:
+            continue
+
+        for dependency in package.requires:
+            dependency_name = dependency.name
+            if dependency_name not in changed_package_dict:
                 continue
 
-            package_path = Path(path).parent
-            if "tests" in str(package_path):
-                package_path = Path(path).parents[1]
+            if package in affected_packages:
+                continue
 
-            # remove root changes
-            if ROOT_PATH in package_paths:
-                package_paths.remove(ROOT_PATH)
+            # pac's dependency is affected by changed packages
+            if dependency.accepts(changed_package_dict[dependency_name]):
+                affected_packages.add(package)
 
-            while True:
-                # make sure changes belong to one of the package
-                if (package_path / "pac.toml").exists():
-                    break
+    affected_packages = list(affected_packages)
 
-                package_path = Path(package_path).parents[0]
+    print(f"we have tracked changed packages: {changed_packages}")
+    print(f"we have found affected packages {affected_packages}")
 
-            package_paths.add(package_path)
-
-        return set(path / "pac.toml" for path in package_paths)
-
-    @classmethod
-    def init(cls):
-        c = delegator.run("git branch | grep \* | cut -d ' ' -f2")
-        if c.err:
-            raise RuntimeError("current branch is not shown due to err")
-        if c.out == "master":
-            raise RuntimeError(
-                "tests behavior will be different if on the master branch"
-            )
-
-        all_paths = set(Path(".").rglob("pac.toml"))
-        changed_paths = cls.track_changed_paths()
-        pending_paths = all_paths - changed_paths
-
-        changed_packages = [
-            Pac.create(path, modified=True).package for path in changed_paths
-        ]
-
-        pending_packages = [Pac.create(path).package for path in pending_paths]
-        return cls(changed_packages, pending_packages)
-
-    def run(self):
-        self._find_affected_packages()
-        print(f"we have tracked changed packages: {self._changed_packages}")
-        print(f"we have found affected packages {self._affected_packages}")
-
-        for package in self._changed_packages:
-            # we need to assume all the requirements in package
-            # is already built there, to let us to install from
-            print(package.name)
-            print("=" * 20)
-            requirements = get_requirements(package, dev=True)
-            generate_requirements_text(requirements)
-            install_package(package)
-            run_package_tests(package)
-
-        for package in self._affected_packages:
-            requirements = get_requirements(package, dev=True)
-            generate_requirements_text(requirements)
-            install_package(package)
-            run_package_tests(package)
-
-        # detect global conflicts by checking the requirements compiled together
-        requirements = []
-        for package in self._changed_packages + self._affected_packages:
-            requirements.extend(get_requirements(package, dev=True))
-
-        # try to compile and see if there is a error
+    for package in changed_packages + affected_packages:
+        # we need to assume all the requirements in package
+        # is already built there, to let us to install from
+        print(package.name)
+        print("=" * 80)
+        requirements = get_requirements(package, dev=True)
         generate_requirements_text(requirements)
-    
-    def _find_affected_packages(self):
-        affected_packages = set()
-        changed_package_dict = {
-            package.name: package for package in self._changed_packages
-        }
+        install_package(package)
+        run_package_tests(package)
 
-        for package in self._pending_packages:
-            # skip the package we have changed
-            if package in self._changed_packages:
-                continue
+    # detect global conflicts by checking the requirements compiled together
+    requirements = []
+    for package in changed_packages + affected_packages:
+        requirements.extend(get_requirements(package, dev=True))
 
-            for dependency in package.requires:
-                dependency_name = dependency.name
-                if dependency_name not in changed_package_dict:
-                    continue
-
-                if package in affected_packages:
-                    continue
-
-                # pac's dependency is affected by changed packages
-                if dependency.accepts(changed_package_dict[dependency_name]):
-                    affected_packages.add(package)
-
-        self._affected_packages = list(affected_packages)
-
-        return self._affected_packages
+    # try to compile and see if there is a error
+    generate_requirements_text(requirements)
 
 
-def main():
-    app = Application.init()
-    app.run()
+@click.command()
+def merge():
+    changed_paths = track_changed_paths()
 
+    changed_pacs = [Pac.create(path, modified=True) for path in changed_paths]
+    for pac in changed_pacs:
+        pac.local_config['package']['version'] = pac.package.next_version
+        with open(pac.file.path, "w") as f:
+            f.write(pac.local_config.as_string())
+
+
+@click.group()
+def cli():
+    pass
+
+
+cli.add_command(scoped_test, "test")
+# cli.add_command(publish, "release")
+cli.add_command(merge, "merge")
 
 if __name__ == "__main__":
-    main()
+    cli()
 
     # from poetry.packages import Dependency
     from poetry.installation import Installer
@@ -394,5 +383,3 @@ if __name__ == "__main__":
     # print(d.constraint)
 
     # functionality pac install version
-
-
