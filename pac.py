@@ -1,9 +1,9 @@
+import functools
 import os
 import re
 
 import click
 import delegator
-import subprocess
 
 from jsonschema import validate
 from pathlib import Path
@@ -47,14 +47,8 @@ PAC_JSON_SCHEMA = {
                 },
             },
         },
-        "dependencies": {
-            "$id": "#/properties/dependencies",
-            "type": "object",
-        },
-        "dev-dependencies": {
-            "$id": "#/properties/dev-dependencies",
-            "type": "object",
-        },
+        "dependencies": {"$id": "#/properties/dependencies", "type": "object"},
+        "dev-dependencies": {"$id": "#/properties/dev-dependencies", "type": "object"},
     },
 }
 
@@ -88,6 +82,7 @@ setup(
 
 
 def cleanup(func):
+    @functools.wraps(func)
     def wraps(*args, **kwargs):
         try:
             return func(*args, **kwargs)
@@ -211,85 +206,6 @@ class Pac:
         validate(config, PAC_JSON_SCHEMA)
 
 
-def generate_requirements_text(requirements):
-    with open(AUTOGEN_REQ_INI, "w+") as f:
-        for dep in requirements:
-            if isinstance(dep, VCSDependency):
-                f.write(f"-e {dep.source}#egg={dep.name}\n")
-            else:
-                f.write(f"{dep.to_pep_508()}\n")
-
-    c = delegator.run(f"pip-compile {AUTOGEN_REQ_INI} -v")
-    c.run()
-    if c.err:
-        raise RuntimeError(c.err)
-    print(c.out)
-
-    os.remove(AUTOGEN_REQ_INI)
-
-
-def get_requirements(package, test=False):
-    if test:
-        requirements = package.requires + package.dev_requires
-    else:
-        requirements = package.requires
-    return requirements
-
-
-def generate_setup(package):
-    with open(AUTOGEN_SETUP_PY, "w+") as f:
-        f.write(
-            SETUP_PY_TEMPLATE.format(
-                package_name=package.name, package_version=package.version
-            )
-        )
-
-
-def upload_package(package, test=False):
-    c = delegator.run(f"python {AUTOGEN_SETUP_PY} sdist")
-    if c.err:
-        if "warning" in c.err or c.err == "":
-            print(c.out)
-        else:
-            raise RuntimeError(c.err)
-    print(c.out)
-
-    if test:
-        url = "http://localhost:8080/"
-    else:
-        url = os.environ['PYPI_URL']
-    c = delegator.run(
-        f"twine upload -u {os.environ['TWINE_USERNAME']} -p "
-        f"{os.environ['TWINE_PASSWORD']} --repository-url {url} "
-        f"dist/{package.name}-{package.version}.tar.gz"
-    )
-    if c.err:
-        raise RuntimeError(c.err)
-    print(c.out)
-
-
-def install_package(package, test=False):
-    generate_setup(package)
-    c1 = delegator.run(f"python {AUTOGEN_SETUP_PY} install")
-    if test:
-        install_requires = f"pip install --no-cache-dir -r {AUTOGEN_REQ_TXT}"
-    else:
-        install_requires = f"pip install -r {AUTOGEN_REQ_TXT}"
-    c2 = delegator.run(install_requires)
-    for c in [c1, c2]:
-        if "warning" in c.err or c.err == "":
-            continue
-        raise RuntimeError(c.err, c.cmd, c.out)
-
-    print(c1.out)
-    print(c2.out)
-
-
-def run_package_tests(package):
-    path = re.sub("\.", "/", package.name)
-    subprocess.call(["pytest", f"{path}"])
-
-
 def track_changed_paths():
     c = delegator.run("git diff origin/master --name-only")
     package_paths = set()
@@ -317,9 +233,109 @@ def track_changed_paths():
     return set(path / "pac.toml" for path in package_paths)
 
 
+class PackageManager:
+    def __init__(self, package, test=False):
+        self._package = package
+        self._test = test
+        self._has_generated = False
+        self._requirements = self.get_requirements()
+
+    @property
+    def requirements(self):
+        return self._requirements
+
+    def get_requirements(self):
+        if self._test:
+            requirements = self._package.requires + self._package.dev_requires
+        else:
+            requirements = self._package.requires
+        return requirements
+
+    def generate_setup(self):
+        with open(AUTOGEN_SETUP_PY, "w+") as f:
+            f.write(
+                SETUP_PY_TEMPLATE.format(
+                    package_name=self._package.name,
+                    package_version=self._package.version,
+                )
+            )
+
+        assert os.path.isfile(AUTOGEN_SETUP_PY)
+
+    @classmethod
+    def generate_requirements_text(cls, requirements):
+        with open(AUTOGEN_REQ_INI, "w+") as f:
+            for dep in requirements:
+                if isinstance(dep, VCSDependency):
+                    f.write(f"-e {dep.source}#egg={dep.name}\n")
+                else:
+                    f.write(f"{dep.to_pep_508()}\n")
+
+        c = delegator.run(f"pip-compile {AUTOGEN_REQ_INI} -v")
+        c.run()
+        if c.err:
+            raise RuntimeError(c.err)
+        print(c.out)
+
+        assert os.path.isfile(AUTOGEN_REQ_TXT)
+
+    def generate_files(self):
+        self._has_generated = True
+        self.generate_setup()
+        self.generate_requirements_text(self.requirements)
+
+    def install(self):
+        self.generate_files()
+        c1 = delegator.run(f"python {AUTOGEN_SETUP_PY} install")
+        if self._test:
+            install_requires = f"pip install --no-cache-dir -r {AUTOGEN_REQ_TXT}"
+        else:
+            install_requires = f"pip install -r {AUTOGEN_REQ_TXT}"
+        c2 = delegator.run(install_requires)
+        for c in [c1, c2]:
+            if "warning" in c.err or c.err == "":
+                continue
+            raise RuntimeError(c.err)
+
+        print(c1.out)
+        print(c2.out)
+
+    def test(self):
+        path = re.sub("\.", "/", self._package.name)
+        c = delegator.run(f"pytest {path}")
+        if c.err:
+            raise RuntimeError(c.err)
+        print(c.out)
+
+    def upload(self):
+        if not self._has_generated:
+            self.generate_files()
+
+        c = delegator.run(f"python {AUTOGEN_SETUP_PY} sdist")
+        if c.err:
+            if "warning" in c.err or c.err == "":
+                print(c.out)
+            else:
+                raise RuntimeError(c.err)
+        print(c.out)
+
+        if self._test:
+            url = "http://localhost:8080/"
+        else:
+            url = os.environ["PYPI_URL"]
+        c = delegator.run(
+            f"twine upload -u {os.environ['TWINE_USERNAME']} -p "
+            f"{os.environ['TWINE_PASSWORD']} --repository-url {url} "
+            f"dist/{self._package.name}-{self._package.version}.tar.gz"
+        )
+        if c.err:
+            raise RuntimeError(c.err)
+        print(c.out)
+
+
 @click.command()
 @cleanup
-def scoped_test():
+def test():
     c = delegator.run("git branch | grep \* | cut -d ' ' -f2")
     if c.err:
         raise RuntimeError("current branch is not shown due to err")
@@ -358,6 +374,8 @@ def scoped_test():
     print(f"we have tracked changed packages: {changed_packages}")
     print(f"we have found affected packages: {affected_packages}")
 
+    # make the dependecy tree
+    # to deduce what is the test order of package
     graph = dict()
     for package in changed_packages:
         # init anyway to make sure we have this index
@@ -383,26 +401,24 @@ def scoped_test():
             break
 
     print(known)
-    test_order = [package_names[name] for name in known]
+    order = [package_names[name] for name in known]
 
-    for package in test_order + affected_packages:
+    global_requirements = []
+
+    for package in order + affected_packages:
         # we need to assume all the requirements in package
         # is already built there, to let us to install from
         print(package.name)
         print("=" * 80)
-        requirements = get_requirements(package, dev=True)
-        generate_requirements_text(requirements)
-        install_package(package, test=True)
-        run_package_tests(package)
-        upload_package(package, test=True)
+        m = PackageManager(package, test=True)
+        m.install()
+        m.test()
+        m.upload()
+        global_requirements.extend(m.requirements)
 
     # detect global conflicts by checking the requirements compiled together
-    requirements = []
-    for package in changed_packages + affected_packages:
-        requirements.extend(get_requirements(package, dev=True))
-
     # try to compile and see if there is a error
-    generate_requirements_text(requirements)
+    PackageManager.generate_requirements_text(global_requirements)
     print("test done")
 
 
@@ -437,10 +453,7 @@ def build(name):
         raise click.BadParameter(
             "Can't find the toml file for subpackage name in the this repo"
         )
-    package = found.package
-    generate_setup(package)
-    generate_requirements_text(get_requirements(package))
-    upload_package(package)
+    PackageManager(found.package).upload()
 
 
 @click.group()
@@ -448,7 +461,7 @@ def cli():
     pass
 
 
-cli.add_command(scoped_test, "test")
+cli.add_command(test, "test")
 cli.add_command(merge, "merge")
 cli.add_command(build, "build")
 
