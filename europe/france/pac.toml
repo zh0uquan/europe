@@ -3,7 +3,7 @@ name = "france"
 version = "0.2.*"
 
 [dependencies]
-requests = "2.14"
+requests = "^2.14"
 trio = "0.10.0"
 
 

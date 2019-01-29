@@ -17,6 +17,7 @@ VERSION_RE = re.compile('version\s+=\s+"*(?P<version>(\d+\.\d+\.\d+))"*')
 
 ROOT_PATH = Path(".")
 REPO_NAME = re.compile(r"europe(\.\w+])*")
+
 AUTOGEN_SETUP_PY = "setup.py"
 AUTOGEN_REQ_INI = "requirements.ini"
 AUTOGEN_REQ_TXT = "requirements.txt"
@@ -32,13 +33,8 @@ PAC_JSON_SCHEMA = {
         "package": {
             "$id": "#/properties/package",
             "type": "object",
-            "required": ["name", "version"],
+            "required": ["version"],
             "properties": {
-                "name": {
-                    "$id": "#/properties/package/properties/name",
-                    "type": "string",
-                    "pattern": "^(.*)$",
-                },
                 "version": {
                     "$id": "#/properties/package/properties/version",
                     "type": "string",
@@ -75,8 +71,8 @@ setup(
     packages=["{package_name}"],
     include_package_data=True,
     zip_safe=True,
-    author="bot",
-    author_email="bot@fake.com"
+    install_requires={install_requires},
+    dependency_links={dependency_links}
 )
 """
 
@@ -167,17 +163,7 @@ class Pac:
         # Checking validity
         cls.check(local_config)
 
-        if str(pac_file.parent) == str(ROOT_PATH):
-            name = local_config["package"]["name"]
-
-        else:
-            if pac_file.parts[-2] != local_config["package"]["name"]:
-                raise RuntimeWarning(
-                    "[package] directory name is not as same as we "
-                    "defined in {},".format(pac_file)
-                )
-
-            name = re.sub("/", ".", str(pac_file.parent))
+        name = str(pac_file.parent).replace("/", ".")
         version = local_config["package"]["version"]
 
         if not modified:
@@ -215,13 +201,13 @@ def track_changed_paths():
         if Path(path).suffix != ".py":
             continue
 
+        # ai/__init__.py
+        if len(Path(path).parts) <= 2:
+            continue
+
         package_path = Path(path).parent
         if "tests" in str(package_path):
             package_path = Path(path).parents[1]
-
-        # remove root changes
-        if ROOT_PATH in package_paths:
-            package_paths.remove(ROOT_PATH)
 
         while True:
             # make sure changes belong to one of the package
@@ -234,10 +220,9 @@ def track_changed_paths():
 
 
 class PackageManager:
-    def __init__(self, package, test=False):
+    def __init__(self, package, is_dev=False):
         self._package = package
-        self._test = test
-        self._has_generated = False
+        self._is_dev = is_dev
         self._requirements = self.get_requirements()
 
     @property
@@ -245,18 +230,29 @@ class PackageManager:
         return self._requirements
 
     def get_requirements(self):
-        if self._test:
+        if self._is_dev:
             requirements = self._package.requires + self._package.dev_requires
         else:
             requirements = self._package.requires
         return requirements
 
     def generate_setup(self):
+        dependency_links, package_requires = [], []
+        for dep in self._requirements:
+            if isinstance(dep, VCSDependency):
+                dependency_links.append(f"{dep.source}#egg={dep.name}")
+            else:
+                name, constraint = dep.to_pep_508().split(" ")
+                constraint = constraint.replace("(", "").replace(")", "")
+                package_requires.append(f"{name}{constraint}")
+
         with open(AUTOGEN_SETUP_PY, "w+") as f:
             f.write(
                 SETUP_PY_TEMPLATE.format(
                     package_name=self._package.name,
                     package_version=self._package.version,
+                    dependency_links=dependency_links,
+                    install_requires=package_requires,
                 )
             )
 
@@ -270,8 +266,8 @@ class PackageManager:
                     f.write(f"-e {dep.source}#egg={dep.name}\n")
                 else:
                     f.write(f"{dep.to_pep_508()}\n")
-
-        c = delegator.run(f"pip-compile {AUTOGEN_REQ_INI} -v")
+        # lookup for local package
+        c = delegator.run(f"pip-compile {AUTOGEN_REQ_INI} -v -f ./dist")
         c.run()
         if c.err:
             raise RuntimeError(c.err)
@@ -279,18 +275,15 @@ class PackageManager:
 
         assert os.path.isfile(AUTOGEN_REQ_TXT)
 
-    def generate_files(self):
-        self._has_generated = True
+    def install(self):
         self.generate_setup()
         self.generate_requirements_text(self.requirements)
 
-    def install(self):
-        self.generate_files()
         c1 = delegator.run(f"python {AUTOGEN_SETUP_PY} install")
-        if self._test:
+        if self._is_dev:
             install_requires = f"pip install --no-cache-dir -r {AUTOGEN_REQ_TXT}"
         else:
-            install_requires = f"pip install -r {AUTOGEN_REQ_TXT}"
+            install_requires = f"pip install -r {AUTOGEN_REQ_TXT} -f ./dist"
         c2 = delegator.run(install_requires)
         for c in [c1, c2]:
             if "warning" in c.err or c.err == "":
@@ -301,15 +294,14 @@ class PackageManager:
         print(c2.out)
 
     def test(self):
-        path = re.sub("\.", "/", self._package.name)
+        path = self._package.name.replace(".", "/")
         c = delegator.run(f"pytest {path}")
         if c.err:
             raise RuntimeError(c.err)
         print(c.out)
 
-    def upload(self):
-        if not self._has_generated:
-            self.generate_files()
+    def distribute(self):
+        self.generate_setup()
 
         c = delegator.run(f"python {AUTOGEN_SETUP_PY} sdist")
         if c.err:
@@ -319,10 +311,10 @@ class PackageManager:
                 raise RuntimeError(c.err)
         print(c.out)
 
-        if self._test:
-            url = "http://localhost:8080/"
-        else:
-            url = os.environ["PYPI_URL"]
+        if self._is_dev:
+            return
+
+        url = os.environ["PYPI_URL"]
         c = delegator.run(
             f"twine upload -u {os.environ['TWINE_USERNAME']} -p "
             f"{os.environ['TWINE_PASSWORD']} --repository-url {url} "
@@ -341,6 +333,7 @@ def test():
         raise RuntimeError("current branch is not shown due to err")
 
     all_paths = set(Path(".").rglob("pac.toml"))
+
     changed_paths = track_changed_paths()
     pending_paths = all_paths - changed_paths
 
@@ -400,7 +393,6 @@ def test():
         if len(graph) == 0:
             break
 
-    print(known)
     order = [package_names[name] for name in known]
 
     global_requirements = []
@@ -408,12 +400,11 @@ def test():
     for package in order + affected_packages:
         # we need to assume all the requirements in package
         # is already built there, to let us to install from
-        print(package.name)
         print("=" * 80)
-        m = PackageManager(package, test=True)
+        m = PackageManager(package, is_dev=True)
         m.install()
         m.test()
-        m.upload()
+        m.distribute()
         global_requirements.extend(m.requirements)
 
     # detect global conflicts by checking the requirements compiled together
@@ -433,27 +424,58 @@ def merge():
             f.write(pac.local_config.as_string())
 
 
-@click.command()
-@click.option("-n", "--name", help="subpackage name")
-@cleanup
-def build(name):
-    """
-    Subpackage actions: build
-    """
-    if not name:
-        raise click.BadParameter("--name is required for subpackage name")
+def search_package(name):
     all_paths = set(Path(".").rglob("pac.toml"))
     found = None
     for path in all_paths:
         local_config = TomlFile(path.as_posix()).read()
         if local_config["package"]["name"] == name:
             found = Pac.create(path)
+    return found
+
+
+@click.command()
+@click.option("-n", "--name", help="subpackage name")
+@click.option("-t", "--test", is_flag=True, help="build in test mode")
+def distribute(name, test):
+    """
+    Subpackage actions: build
+    """
+    if not name:
+        raise click.BadParameter("--name is required for subpackage name")
+
+    found = search_package(name)
 
     if not found:
         raise click.BadParameter(
             "Can't find the toml file for subpackage name in the this repo"
         )
-    PackageManager(found.package).upload()
+
+    PackageManager(found.package, is_dev=test).distribute()
+
+
+@click.command()
+@click.option("-n", "--name", help="subpackage name")
+def install(name):
+    """
+    Subpackage actions: build
+    """
+    if not name:
+        raise click.BadParameter("--name is required for subpackage name")
+
+    found = search_package(name)
+
+    if not found:
+        raise click.BadParameter(
+            "Can't find the toml file for subpackage name in the this repo"
+        )
+
+    PackageManager(found.package, is_dev=test).install()
+
+
+@click.command()
+def deploy(names):
+    pass
 
 
 @click.group()
@@ -463,7 +485,9 @@ def cli():
 
 cli.add_command(test, "test")
 cli.add_command(merge, "merge")
-cli.add_command(build, "build")
+cli.add_command(distribute, "distribute")
+cli.add_command(install, "install")
+cli.add_command(deploy, "deploy")
 
 if __name__ == "__main__":
     cli()
