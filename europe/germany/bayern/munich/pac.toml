@@ -3,7 +3,7 @@ name = "munich"
 version = "0.1.*"
 
 [dependencies]
-"europe.france" = "0.1.0"
+"europe.france" = "^0.2.0"
 fasttext = { git = "git+git://github.com/facebookresearch/fastText.git"}
 
 [dev-dependencies]
