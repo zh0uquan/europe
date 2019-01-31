@@ -1,0 +1,4 @@
+poetry
+pip-tools
+pytest
+delegator.py

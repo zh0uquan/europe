@@ -1,8 +1,5 @@
+
 import trio
-
-
-__all__ = ("paris", "NAME")
-
 
 NAME = "FRANCE"
 
